@@ -1,0 +1,63 @@
+
+#define CUSTOM_SETTINGS
+#define INCLUDE_TERMINAL_MODULE
+#include <DabbleESP32.h>
+
+// Serial2 hacia la Nucleo 1. Mantener GND comun.
+#define PIN_RX2 16  // Recibe de PC6 (TX de la Nucleo 1).
+#define PIN_TX2 17  // Envia a PC7 (RX de la Nucleo 1).
+
+String lineaNucleo = "";
+
+void setup() {
+  Serial.begin(115200);
+  Serial2.begin(115200, SERIAL_8N1, PIN_RX2, PIN_TX2);
+  Dabble.begin("MyEsp32");
+}
+
+void loop() {
+  Dabble.processInput();
+
+  // Celular -> ESP32 -> Nucleo 1.
+  if (Terminal.available() != 0) {
+    String cmd = "";
+    while (Terminal.available() != 0) {
+      char c = Terminal.read();
+      if (c != '\r' && c != '\n') cmd += c;
+    }
+    cmd.trim();
+    cmd.toUpperCase();
+
+    if (cmd == "1" || cmd == "R" || cmd == "LECTURA" || cmd == "READ") {
+      Serial2.print("READ\n");
+      Serial.println("Comando enviado: READ");
+    } else if (cmd == "2" || cmd == "G" || cmd == "GUARDAR" || cmd == "GUARDADO" || cmd == "SAVE") {
+      Serial2.print("SAVE\n");
+      Serial.println("Comando enviado: SAVE");
+    } else if (cmd == "3" || cmd == "C" || cmd == "CAL" || cmd == "CALIBRAR" || cmd == "CALIBRACION") {
+      Serial2.print("CAL\n");
+      Serial.println("Comando enviado: CAL");
+    } else if (cmd == "4" || cmd == "Z" || cmd == "REF" || cmd == "REFERENCIA" || cmd == "EXTENSION") {
+      // La Nucleo 1 traduce REF a Z y espera la confirmacion de Nucleo 2.
+      Serial2.print("REF\n");
+      Serial.println("Comando enviado: REF");
+    } else if (cmd.length() > 0) {
+      Terminal.print("Comando no valido. Usa 1 (lectura), 2 (guardar), 3 (calibrar) o 4/Z (referencia de extension)\n");
+    }
+  }
+
+  // Nucleo 1 -> ESP32 -> celular. Reenviar todas las respuestas.
+  while (Serial2.available() != 0) {
+    char c = Serial2.read();
+    if (c == '\n') {
+      lineaNucleo.trim();
+      if (lineaNucleo.length() > 0) {
+        Terminal.print(lineaNucleo + "\n");
+        Serial.println(lineaNucleo);
+      }
+      lineaNucleo = "";
+    } else if (c != '\r') {
+      lineaNucleo += c;
+    }
+  }
+}
