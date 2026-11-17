@@ -1,0 +1,400 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c  (NUCLEO 1)
+  * @brief          : PC (USART2) <-> Nucleo 1 <-> Nucleo 2 (USART1)
+  *                   Menu: 1 = LED en Nucleo 2, 2 = cancion por DAC (PA4)
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+
+/* USER CODE BEGIN Includes */
+#include <string.h>
+#include <math.h>
+/* USER CODE END Includes */
+
+/* USER CODE BEGIN PD */
+#define TIMEOUT_RESP_MS   500
+#define N_MUESTRAS        32
+#define F_TIMER           16000000UL   // reloj de TIM6 (HSI 16 MHz, PSC = 0)
+
+// Notas (Hz). 0 = silencio
+#define SIL   0
+#define SOL4  392
+#define SI4   494
+#define SIb4  466
+#define DO5   523
+#define DOs5  554
+#define RE5   587
+#define MI5   659
+#define FA5   698
+#define FAs5  740
+#define SOL5  784
+#define LA5   880
+#define MI4   330
+#define LA4   440
+#define RE4   294
+#define FAs4  370
+/* USER CODE END PD */
+
+/* Private variables ---------------------------------------------------------*/
+DAC_HandleTypeDef hdac;
+
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim6;
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+
+/* USER CODE BEGIN PV */
+uint8_t rx_pc;
+uint8_t rx_n2;
+char buf_n2[32];
+uint8_t idx_n2 = 0;
+uint8_t esperando = 0;
+uint32_t t_envio = 0;
+
+uint16_t seno[N_MUESTRAS];
+
+typedef struct { uint16_t freq; uint16_t ms; } Nota;
+
+/*
+ * Melodia aproximada a partir de los acordes de la pagina (se usa la nota
+ * raiz de cada acorde). Ajusta frecuencias y duraciones (ms) a tu gusto.
+ */
+const Nota cancion[] = {
+  // --- Intro / estrofa (E D C G B7), dos veces ---
+  {MI5,400},{RE5,400},{DO5,400},{SOL4,400},{SI4,600},{SIL,200},
+  {MI5,400},{RE5,400},{DO5,400},{SOL4,400},{SI4,600},{SIL,300},
+
+  // --- Puente (C#m B E D C#m B) ---
+  {DOs5,400},{SI4,400},{MI5,400},{RE5,400},{DOs5,400},{SI4,600},{SIL,300},
+
+  // --- Coro (G A G A / D G A F# / Bm G C A) ---
+  {SOL5,150},{LA5,150},{SOL5,150},{LA5,150},
+  {RE5,250},{SOL5,250},{LA5,250},{FAs5,300},
+  {SI4,250},{SOL4,250},{DO5,250},{LA4,400},{SIL,150},
+
+  {SOL5,150},{LA5,150},{SOL5,150},{LA5,150},
+  {RE5,250},{SOL5,250},{LA5,250},{FAs5,250},{SI4,300},
+  {SIb4,500},{SIL,150},
+
+  {SOL5,150},{LA5,150},{SOL5,150},{LA5,150},
+  {RE5,250},{SOL5,250},{LA5,250},{FAs5,250},{SI4,250},
+  {SOL4,250},{DO5,250},{LA4,400},{SIL,150},
+
+  {SOL5,150},{LA5,150},{SOL5,150},{LA5,150},
+  {RE5,250},{SOL5,250},{LA5,250},{FAs5,300},
+  {SI4,300},{SIb4,600},{SIL,200},
+
+  // --- Final (G E F G A) ---
+  {SOL5,250},{MI5,250},{FA5,250},{SOL5,250},{LA5,700}
+};
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_DAC_Init(void);
+static void MX_TIM3_Init(void);
+static void MX_TIM6_Init(void);
+/* USER CODE BEGIN PFP */
+static void PC_Print(const char *s);
+static void Mostrar_Menu(void);
+static void Sonido_Init(void);
+static void Tono(uint32_t freq, uint32_t ms);
+static void Reproducir_Cancion(void);
+/* USER CODE END PFP */
+
+/* USER CODE BEGIN 0 */
+
+/* USER CODE END 0 */
+
+int main(void)
+{
+  HAL_Init();
+  SystemClock_Config();
+
+  /* Initialize all configured peripherals (DMA antes que el DAC) */
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
+  MX_DAC_Init();
+  MX_TIM3_Init();
+  MX_TIM6_Init();
+  /* USER CODE BEGIN 2 */
+  Sonido_Init();
+  Mostrar_Menu();
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  while (1)
+  {
+    /* USER CODE BEGIN 3 */
+
+    // ---- PC -> Nucleo 1 ----
+    if (HAL_UART_Receive(&huart2, &rx_pc, 1, 0) == HAL_OK)
+    {
+      if (rx_pc == '1')
+      {
+        HAL_UART_Transmit(&huart1, (uint8_t*)"LED:1\n", 6, 100);
+        esperando = 1;
+        t_envio = HAL_GetTick();
+        PC_Print("\r\nEnviando LED:1 a la Nucleo 2...");
+      }
+      else if (rx_pc == '2')
+      {
+        PC_Print("\r\nReproduciendo cancion...");
+        Reproducir_Cancion();
+        PC_Print("\r\nListo.");
+        Mostrar_Menu();
+      }
+      else if (rx_pc != '\r' && rx_pc != '\n')
+      {
+        PC_Print("\r\nOpcion invalida.");
+        Mostrar_Menu();
+      }
+    }
+
+    // ---- Nucleo 2 -> Nucleo 1 -> PC ----
+    if (HAL_UART_Receive(&huart1, &rx_n2, 1, 0) == HAL_OK)
+    {
+      if (rx_n2 == '\n')
+      {
+        buf_n2[idx_n2] = 0;
+        idx_n2 = 0;
+        esperando = 0;
+        PC_Print("\r\nNucleo 2 responde: ");
+        PC_Print(buf_n2);
+        Mostrar_Menu();
+      }
+      else if (rx_n2 != '\r' && idx_n2 < 31)
+      {
+        buf_n2[idx_n2++] = rx_n2;
+      }
+    }
+
+    // ---- Timeout de la Nucleo 2 ----
+    if (esperando && (HAL_GetTick() - t_envio) > TIMEOUT_RESP_MS)
+    {
+      esperando = 0;
+      PC_Print("\r\nERROR: la Nucleo 2 no responde (revisa TX/RX cruzados y GND).");
+      Mostrar_Menu();
+    }
+
+    __HAL_UART_CLEAR_OREFLAG(&huart1);
+    __HAL_UART_CLEAR_OREFLAG(&huart2);
+    /* USER CODE END 3 */
+  }
+}
+
+/**
+  * @brief System Clock Configuration (HSI 16 MHz, sin PLL)
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE3);
+
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_DAC_Init(void)
+{
+  DAC_ChannelConfTypeDef sConfig = {0};
+
+  hdac.Instance = DAC;
+  if (HAL_DAC_Init(&hdac) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  sConfig.DAC_Trigger = DAC_TRIGGER_T6_TRGO;
+  sConfig.DAC_OutputBuffer = DAC_OUTPUTBUFFER_ENABLE;
+  if (HAL_DAC_ConfigChannel(&hdac, &sConfig, DAC_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_TIM3_Init(void)
+{
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 84-1;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 19764-1;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_TIM6_Init(void)
+{
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 0;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 999;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim6, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_USART1_UART_Init(void)
+{
+  huart1.Instance = USART1;
+  huart1.Init.BaudRate = 115200;
+  huart1.Init.WordLength = UART_WORDLENGTH_8B;
+  huart1.Init.StopBits = UART_STOPBITS_1;
+  huart1.Init.Parity = UART_PARITY_NONE;
+  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart1.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+static void MX_USART2_UART_Init(void)
+{
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 115200;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * Enable DMA controller clock (DAC1 -> DMA1 Stream5)
+  */
+static void MX_DMA_Init(void)
+{
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  HAL_NVIC_SetPriority(DMA1_Stream5_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream5_IRQn);
+}
+
+static void MX_GPIO_Init(void)
+{
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+}
+
+/* USER CODE BEGIN 4 */
+static void PC_Print(const char *s)
+{
+  HAL_UART_Transmit(&huart2, (uint8_t*)s, strlen(s), 100);
+}
+
+static void Mostrar_Menu(void)
+{
+  PC_Print("\r\n===== MENU =====\r\n");
+  PC_Print("1. Prender LED 1 por 5 s (Nucleo 2)\r\n");
+  PC_Print("2. Reproducir cancion\r\n");
+  PC_Print("Opcion: ");
+}
+
+// Llena la tabla de un ciclo de seno (12 bits)
+static void Sonido_Init(void)
+{
+  for (int i = 0; i < N_MUESTRAS; i++)
+    seno[i] = 2048 + (uint16_t)(1800.0f * sinf(2.0f * 3.14159265f * i / N_MUESTRAS));
+}
+
+// Toca 'freq' Hz durante 'ms' milisegundos (freq = 0 -> silencio)
+static void Tono(uint32_t freq, uint32_t ms)
+{
+  if (freq == 0) { HAL_Delay(ms); return; }
+
+  __HAL_TIM_SET_AUTORELOAD(&htim6, (F_TIMER / (freq * N_MUESTRAS)) - 1);
+  __HAL_TIM_SET_COUNTER(&htim6, 0);
+  HAL_DAC_Start_DMA(&hdac, DAC_CHANNEL_1, (uint32_t*)seno, N_MUESTRAS, DAC_ALIGN_12B_R);
+  HAL_TIM_Base_Start(&htim6);
+  HAL_Delay(ms);
+  HAL_TIM_Base_Stop(&htim6);
+  HAL_DAC_Stop_DMA(&hdac, DAC_CHANNEL_1);
+  HAL_Delay(20);   // pausa corta entre notas
+}
+
+static void Reproducir_Cancion(void)
+{
+  for (uint32_t i = 0; i < sizeof(cancion) / sizeof(cancion[0]); i++)
+    Tono(cancion[i].freq, cancion[i].ms);
+}
+/* USER CODE END 4 */
+
+void Error_Handler(void)
+{
+  __disable_irq();
+  while (1)
+  {
+  }
+}
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+}
+#endif /* USE_FULL_ASSERT */
